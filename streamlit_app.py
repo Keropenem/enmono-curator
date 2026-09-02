@@ -336,6 +336,24 @@ def _clear_inputs(prefix: str) -> None:
         st.session_state.pop(k, None)
 
 
+def _form_prefix(layer: str) -> str:
+    """入力欄のキーに版番号を混ぜる。キーを消すだけでは画面側が同じ値を
+    送り直してしまい、登録後に欄が空にならないため"""
+    return f"f_{layer}_{st.session_state.get(f'ver_{layer}', 0)}"
+
+
+def _reset_form(layer: str, prefix: str) -> None:
+    _clear_inputs(prefix)
+    st.session_state[f"ver_{layer}"] = st.session_state.get(f"ver_{layer}", 0) + 1
+
+
+def _has_input(prefix: str) -> bool:
+    for suffix in ("name", "url", "reason"):
+        if str(st.session_state.get(f"{prefix}__{suffix}") or "").strip():
+            return True
+    return bool(_collect_products(prefix))
+
+
 def render_form(layer: str, curator: str) -> None:
     if layer == "known":
         st.info("**知っているブランドを登録します。** "
@@ -348,7 +366,7 @@ def render_form(layer: str, curator: str) -> None:
     if flash:
         st.success(flash)
 
-    prefix = f"f_{layer}"
+    prefix = _form_prefix(layer)
     _seed_products(prefix)
 
     c1, c2 = st.columns([1, 1.4])
@@ -374,8 +392,28 @@ def render_form(layer: str, curator: str) -> None:
     url = st.session_state.get(f"{prefix}__url", "")
     brand_reason = st.session_state.get(f"{prefix}__reason", "")
 
-    if st.button("登録する", key=f"{prefix}__submit",
-                 use_container_width=True, type="primary"):
+    b1, b2 = st.columns([3, 1])
+    submitted = b1.button("登録する", key=f"{prefix}__submit",
+                          use_container_width=True, type="primary")
+    if b2.button("入力を消す", key=f"{prefix}__clear", use_container_width=True):
+        if _has_input(prefix):
+            st.session_state[f"confirm_clear_{layer}"] = True
+        else:
+            _reset_form(layer, prefix)
+        st.rerun()
+
+    if st.session_state.get(f"confirm_clear_{layer}"):
+        st.warning("入力中の内容を消します。元に戻せません。")
+        y, n = st.columns(2)
+        if y.button("消す", key=f"{prefix}__clear_yes", use_container_width=True):
+            st.session_state.pop(f"confirm_clear_{layer}", None)
+            _reset_form(layer, prefix)
+            st.rerun()
+        if n.button("やめる", key=f"{prefix}__clear_no", use_container_width=True):
+            st.session_state.pop(f"confirm_clear_{layer}", None)
+            st.rerun()
+
+    if submitted:
         errs = check(name, url, brand_reason)
         if errs:
             for e in errs:
@@ -412,7 +450,7 @@ def render_form(layer: str, curator: str) -> None:
             st.error(msg)
             return
         st.session_state[f"flash_{layer}"] = f"{name.strip()} を登録しました（{msg}）"
-        _clear_inputs(prefix)
+        _reset_form(layer, prefix)
         st.cache_data.clear()
         st.rerun()
 
@@ -433,7 +471,7 @@ def render_form(layer: str, curator: str) -> None:
             st.session_state.pop(f"force_{layer}", None)
             if ok:
                 st.session_state[f"flash_{layer}"] = f"登録しました（{msg}）"
-                _clear_inputs(prefix)
+                _reset_form(layer, prefix)
                 st.cache_data.clear()
             else:
                 st.error(msg)
