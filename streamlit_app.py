@@ -8,7 +8,7 @@
     ステップ2 見つけたもの     : 調べていて出会い、ピンときたブランド
 
 起動:
-  streamlit run streamlit_app.py
+  streamlit run ui/curator.py
 """
 from __future__ import annotations
 
@@ -53,6 +53,13 @@ def _secret(key: str, default: str | None = None) -> str | None:
     return os.environ.get(key, default)
 
 
+def _on_cloud() -> bool:
+    """Streamlit Community Cloud で動いているか。Cloud のファイルは再起動で消える"""
+    return bool(os.environ.get("HOSTNAME", "").startswith("streamlit")
+                or os.environ.get("STREAMLIT_SHARING_MODE")
+                or os.path.exists("/mount/src"))
+
+
 @st.cache_resource(show_spinner=False)
 def _client():
     """Supabase に繋がればそれを使い、繋がらなければローカル保存に切り替える"""
@@ -63,6 +70,33 @@ def _client():
         return create_client(url, key)
     except Exception:
         return None
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _connection_status() -> tuple[bool, str]:
+    """接続できるかを実際に1回問い合わせて確かめる。失敗理由もそのまま返す"""
+    url = _secret("SUPABASE_URL")
+    if not url:
+        return False, "SUPABASE_URL が設定されていません"
+    if not _secret("SUPABASE_SERVICE_ROLE_KEY"):
+        return False, "SUPABASE_SERVICE_ROLE_KEY が設定されていません"
+    sb = _client()
+    if sb is None:
+        return False, "接続の準備ができませんでした"
+    try:
+        sb.table(TABLE).select("id").limit(1).execute()
+        return True, ""
+    except Exception as e:
+        msg = str(e)
+        host = url.replace("https://", "").replace("http://", "").rstrip("/")
+        if "Name or service not known" in msg or "getaddrinfo" in msg:
+            return False, (f"接続先 `{host}` が見つかりません。"
+                           "SUPABASE_URL の綴りを確認してください")
+        if "Invalid API key" in msg or "JWT" in msg or "401" in msg:
+            return False, "キーが正しくありません。service_role キーか確認してください"
+        if "does not exist" in msg or "PGRST205" in msg:
+            return False, f"テーブル {TABLE} がありません。DDL を流してください"
+        return False, f"接続先 `{host}` へ繋がりません: {msg[:120]}"
 
 
 def _password_ok() -> bool:
@@ -107,7 +141,16 @@ def load_rows(curator: str) -> list[dict]:
     return [r for r in _local_rows() if r.get("curator") == curator][::-1]
 
 
+def _products_to_legacy(row: dict) -> dict:
+    """旧カラムにも先頭商品を入れておく（過去データと並べて見るため）"""
+    ps = row.get("products") or []
+    row["product_name"] = ps[0]["name"] if ps else None
+    row["product_reason"] = ps[0].get("reason") or None if ps else None
+    return row
+
+
 def save_row(row: dict) -> tuple[bool, str]:
+    row = _products_to_legacy(dict(row))
     sb = _client()
     if sb:
         try:
@@ -123,6 +166,25 @@ def save_row(row: dict) -> tuple[bool, str]:
         f.write(json.dumps({**row, "created_at": datetime.now().isoformat()},
                            ensure_ascii=False) + "\n")
     return True, "この端末に保存しました"
+
+
+def update_row(row_id, curator: str, patch: dict) -> tuple[bool, str]:
+    patch = _products_to_legacy(dict(patch))
+    sb = _client()
+    if sb and isinstance(row_id, int):
+        try:
+            sb.table(TABLE).update(patch).eq("id", row_id).execute()
+            return True, "更新しました"
+        except Exception as e:
+            return False, f"更新できませんでした（{e}）"
+    rows = _local_rows()
+    for r in rows:
+        if r.get("official_url") == row_id and r.get("curator") == curator:
+            r.update(patch)
+    LOCAL_STORE.write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + chr(10) for r in rows),
+        encoding="utf-8")
+    return True, "更新しました"
 
 
 def delete_row(row_id, curator: str) -> None:
@@ -227,17 +289,17 @@ def render_form(layer: str, curator: str) -> None:
                          "職人が一本ずつ手で仕上げていて、直して使う文化そのものを掲げている。"),
             help="ここが最も価値のある情報です。AIには書けない部分なので、思ったことをそのまま書いてください。")
 
-        st.markdown("###### おすすめの商品（あれば）")
-        c3, c4 = st.columns([1, 2])
-        with c3:
-            product = st.text_input("商品名", placeholder="折りたたみ傘",
-                                    label_visibility="collapsed")
-        with c4:
-            product_reason = st.text_input(
-                "その商品をおすすめする理由", placeholder="この一本にブランドの考えがいちばん出ている",
-                label_visibility="collapsed")
-
-        st.caption("商品が思い当たらなければ空欄で構いません。ブランドだけの登録でも十分です。")
+        st.markdown("###### おすすめの商品（あれば・何件でも）")
+        products = st.data_editor(
+            pd.DataFrame([{"商品名": "", "その商品をおすすめする理由": ""}]),
+            num_rows="dynamic", use_container_width=True, hide_index=True,
+            key=f"products_{layer}",
+            column_config={
+                "商品名": st.column_config.TextColumn(width="small"),
+                "その商品をおすすめする理由": st.column_config.TextColumn(width="large"),
+            })
+        st.caption("行を増やすには、表の右上の ＋ を押すか、一番下の空行に直接入力します。"
+                   "商品が思い当たらなければ空欄のままで構いません。")
         submitted = st.form_submit_button("登録する", use_container_width=True, type="primary")
 
     if submitted:
@@ -246,6 +308,14 @@ def render_form(layer: str, curator: str) -> None:
             for e in errs:
                 st.error(e)
             return
+
+        plist = []
+        if products is not None:
+            for _, r in products.iterrows():
+                nm = str(r.get("商品名") or "").strip()
+                rs = str(r.get("その商品をおすすめする理由") or "").strip()
+                if nm:
+                    plist.append({"name": nm, "reason": rs})
 
         dup = find_own_duplicate(url, curator)
         if dup:
@@ -260,9 +330,7 @@ def render_form(layer: str, curator: str) -> None:
                 "重複ではなく理由を足したい場合は、そのまま登録して構いません。")
             st.session_state[f"force_{layer}"] = {
                 "brand_name": name.strip(), "official_url": url.strip(),
-                "brand_reason": brand_reason.strip(),
-                "product_name": product.strip() or None,
-                "product_reason": product_reason.strip() or None,
+                "brand_reason": brand_reason.strip(), "products": plist,
                 "layer": layer, "curator": curator,
                 "existing_brand_id": hit.get("id"),
             }
@@ -272,8 +340,7 @@ def render_form(layer: str, curator: str) -> None:
             "brand_name": name.strip(),
             "official_url": url.strip(),
             "brand_reason": brand_reason.strip(),
-            "product_name": product.strip() or None,
-            "product_reason": product_reason.strip() or None,
+            "products": plist,
             "layer": layer,
             "curator": curator,
         })
@@ -304,26 +371,72 @@ def render_list(curator: str) -> None:
         return
 
     n_known = sum(1 for r in rows if r.get("layer") == "known")
-    n_exp = len(rows) - n_known
     c1, c2, c3 = st.columns(3)
     c1.metric("登録数", len(rows))
     c2.metric("知っているもの", n_known)
-    c3.metric("見つけたもの", n_exp)
-
+    c3.metric("見つけたもの", len(rows) - n_known)
+    st.caption("内容を直したいときは、各ブランドの「編集」を開いてください。")
     st.markdown("---")
+
     for r in rows:
-        head = f"**{r.get('brand_name')}**　" \
-               f"<span style='color:#6b7480;font-size:0.85em'>{LAYERS.get(r.get('layer'), '')}</span>"
-        st.markdown(head, unsafe_allow_html=True)
+        key = r.get("id") if isinstance(r.get("id"), int) else r.get("official_url")
+        ps = r.get("products") or ([{"name": r["product_name"],
+                                     "reason": r.get("product_reason") or ""}]
+                                   if r.get("product_name") else [])
+
+        st.markdown(f"**{r.get('brand_name')}**　"
+                    f"<span style='color:#6b7480;font-size:0.85em'>"
+                    f"{LAYERS.get(r.get('layer'), '')}</span>", unsafe_allow_html=True)
         st.markdown(f"[{r.get('official_url')}]({r.get('official_url')})")
         if r.get("brand_reason"):
-            st.markdown(f"　{r['brand_reason']}")
-        if r.get("product_name"):
-            st.markdown(f"　**{r['product_name']}** — {r.get('product_reason') or ''}")
-        key = r.get("id") if isinstance(r.get("id"), int) else r.get("official_url")
-        if st.button("削除", key=f"del_{key}"):
-            delete_row(key, curator)
-            st.rerun()
+            st.markdown("　" + r["brand_reason"])
+        for pr in ps:
+            st.markdown(f"　**{pr.get('name')}** — {pr.get('reason') or ''}")
+
+        with st.expander("編集"):
+            with st.form(f"edit_{key}"):
+                e1, e2 = st.columns([1, 1.4])
+                with e1:
+                    en = st.text_input("ブランド名", value=r.get("brand_name") or "")
+                with e2:
+                    eu = st.text_input("公式サイトのURL", value=r.get("official_url") or "")
+                er = st.text_area("おすすめする理由", value=r.get("brand_reason") or "", height=100)
+                base = pd.DataFrame(
+                    [{"商品名": x.get("name", ""), "その商品をおすすめする理由": x.get("reason", "")}
+                     for x in ps] or [{"商品名": "", "その商品をおすすめする理由": ""}])
+                ep = st.data_editor(base, num_rows="dynamic", hide_index=True,
+                                    use_container_width=True, key=f"ed_products_{key}")
+                el = st.selectbox(
+                    "どちらで登録したか", ["known", "explored"],
+                    index=0 if r.get("layer") == "known" else 1,
+                    format_func=lambda v: LAYERS[v])
+                if st.form_submit_button("この内容で更新する", use_container_width=True):
+                    errs = check(en, eu, er)
+                    if errs:
+                        for x in errs:
+                            st.error(x)
+                    else:
+                        plist = []
+                        for _, pr in ep.iterrows():
+                            nm = str(pr.get("商品名") or "").strip()
+                            rs = str(pr.get("その商品をおすすめする理由") or "").strip()
+                            if nm:
+                                plist.append({"name": nm, "reason": rs})
+                        ok, msg = update_row(key, curator, {
+                            "brand_name": en.strip(), "official_url": eu.strip(),
+                            "brand_reason": er.strip(), "products": plist, "layer": el})
+                        if ok:
+                            st.cache_data.clear()
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+
+            st.caption("この登録を消す場合はこちら。元に戻せません。")
+            if st.button("削除する", key=f"del_{key}"):
+                delete_row(key, curator)
+                st.cache_data.clear()
+                st.rerun()
         st.markdown("---")
 
 
@@ -350,9 +463,16 @@ def main() -> None:
     st.title("ブランド登録")
     curator = _secret("CURATOR_NAME") or CURATOR_DEFAULT
 
-    if _client() is None:
-        st.caption("サーバーに繋がっていないため、この端末に保存します。"
-                   "あとでまとめて送れるので、そのまま入力を続けて構いません。")
+    ok, why = _connection_status()
+    if not ok:
+        if _on_cloud():
+            st.error("**データベースに繋がっていません。このまま入力しないでください。**")
+            st.error(f"理由: {why}")
+            st.caption("この状態で登録すると、入力が保存されないまま消えることがあります。"
+                       "管理者に連絡してください。")
+            st.stop()
+        st.warning(f"データベースに繋がっていません（{why}）。"
+                   "この端末に保存するので、そのまま入力を続けて構いません。")
 
     tab_known, tab_explored, tab_list, tab_export = st.tabs(
         ["知っているもの", "見つけたもの", "登録した一覧", "書き出し"])
