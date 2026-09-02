@@ -374,6 +374,85 @@ def render_form(layer: str, curator: str) -> None:
             st.rerun()
 
 
+def _products_of(row: dict) -> list[dict]:
+    """新旧どちらの形でも、商品の一覧として取り出す"""
+    ps = row.get("products") or []
+    if not ps and row.get("product_name"):
+        ps = [{"name": row["product_name"], "reason": row.get("product_reason") or ""}]
+    return ps
+
+
+def _excerpt(text: str, n: int = 22) -> str:
+    t = " ".join((text or "").split())
+    return t if len(t) <= n else t[:n] + "…"
+
+
+def _render_delete(key, row: dict, curator: str) -> None:
+    """一発では消さない。押し間違いは取り返しがつかないため"""
+    flag = f"confirm_del_{key}"
+    if not st.session_state.get(flag):
+        if st.button("この登録を削除する", key=f"del_{key}"):
+            st.session_state[flag] = True
+            st.rerun()
+        return
+
+    st.warning(f"「{row.get('brand_name')}」を削除します。元に戻せません。")
+    yes, no = st.columns(2)
+    if yes.button("削除する", key=f"yes_{key}", use_container_width=True):
+        delete_row(key, curator)
+        st.session_state.pop(flag, None)
+        st.session_state["edit_target"] = None
+        st.cache_data.clear()
+        st.rerun()
+    if no.button("やめる", key=f"no_{key}", use_container_width=True):
+        st.session_state.pop(flag, None)
+        st.rerun()
+
+
+def _render_editor(row: dict, key, products: list[dict], curator: str) -> None:
+    with st.container(border=True):
+        with st.form(f"edit_{key}"):
+            e1, e2 = st.columns([1, 1.4])
+            with e1:
+                name = st.text_input("ブランド名", value=row.get("brand_name") or "")
+            with e2:
+                url = st.text_input("公式サイトのURL", value=row.get("official_url") or "")
+            reason = st.text_area("このブランドをおすすめする理由",
+                                  value=row.get("brand_reason") or "", height=120)
+            st.caption("おすすめの商品")
+            base = pd.DataFrame(
+                [{"商品名": x.get("name", ""), "その商品をおすすめする理由": x.get("reason", "")}
+                 for x in products] or [{"商品名": "", "その商品をおすすめする理由": ""}])
+            edited = st.data_editor(base, num_rows="dynamic", hide_index=True,
+                                    use_container_width=True, key=f"ed_products_{key}")
+            layer = st.selectbox("どちらで登録したか", ["known", "explored"],
+                                 index=0 if row.get("layer") == "known" else 1,
+                                 format_func=lambda v: LAYERS[v])
+            if st.form_submit_button("この内容で更新する", use_container_width=True):
+                errs = check(name, url, reason)
+                if errs:
+                    for x in errs:
+                        st.error(x)
+                else:
+                    plist = []
+                    for _, pr in edited.iterrows():
+                        nm = str(pr.get("商品名") or "").strip()
+                        rs = str(pr.get("その商品をおすすめする理由") or "").strip()
+                        if nm:
+                            plist.append({"name": nm, "reason": rs})
+                    ok, msg = update_row(key, curator, {
+                        "brand_name": name.strip(), "official_url": url.strip(),
+                        "brand_reason": reason.strip(), "products": plist, "layer": layer})
+                    if ok:
+                        st.cache_data.clear()
+                        st.session_state["edit_target"] = None
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
+        _render_delete(key, row, curator)
+
+
 def render_list(curator: str) -> None:
     rows = load_rows(curator)
     if not rows:
@@ -381,73 +460,44 @@ def render_list(curator: str) -> None:
         return
 
     n_known = sum(1 for r in rows if r.get("layer") == "known")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("登録数", len(rows))
-    c2.metric("知っているもの", n_known)
-    c3.metric("見つけたもの", len(rows) - n_known)
-    st.caption("内容を直したいときは、各ブランドの「編集」を開いてください。")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("登録数", len(rows))
+    m2.metric("知っているもの", n_known)
+    m3.metric("見つけたもの", len(rows) - n_known)
     st.markdown("---")
 
-    for r in rows:
-        key = r.get("id") if isinstance(r.get("id"), int) else r.get("official_url")
-        ps = r.get("products") or ([{"name": r["product_name"],
-                                     "reason": r.get("product_reason") or ""}]
-                                   if r.get("product_name") else [])
+    widths = [3, 4.4, 0.9, 1.4]
+    h1, h2, h3, _h4 = st.columns(widths)
+    h1.caption("ブランド")
+    h2.caption("おすすめの理由")
+    h3.caption("商品")
 
-        st.markdown(f"**{r.get('brand_name')}**　"
-                    f"<span style='color:#6b7480;font-size:0.85em'>"
-                    f"{LAYERS.get(r.get('layer'), '')}</span>", unsafe_allow_html=True)
-        st.markdown(f"[{r.get('official_url')}]({r.get('official_url')})")
-        if r.get("brand_reason"):
-            st.markdown("　" + r["brand_reason"])
-        for pr in ps:
-            st.markdown(f"　**{pr.get('name')}** — {pr.get('reason') or ''}")
+    for row in rows:
+        key = row.get("id") if isinstance(row.get("id"), int) else row.get("official_url")
+        products = _products_of(row)
+        opened = st.session_state.get("edit_target") == key
 
-        with st.expander("編集"):
-            with st.form(f"edit_{key}"):
-                e1, e2 = st.columns([1, 1.4])
-                with e1:
-                    en = st.text_input("ブランド名", value=r.get("brand_name") or "")
-                with e2:
-                    eu = st.text_input("公式サイトのURL", value=r.get("official_url") or "")
-                er = st.text_area("おすすめする理由", value=r.get("brand_reason") or "", height=100)
-                base = pd.DataFrame(
-                    [{"商品名": x.get("name", ""), "その商品をおすすめする理由": x.get("reason", "")}
-                     for x in ps] or [{"商品名": "", "その商品をおすすめする理由": ""}])
-                ep = st.data_editor(base, num_rows="dynamic", hide_index=True,
-                                    use_container_width=True, key=f"ed_products_{key}")
-                el = st.selectbox(
-                    "どちらで登録したか", ["known", "explored"],
-                    index=0 if r.get("layer") == "known" else 1,
-                    format_func=lambda v: LAYERS[v])
-                if st.form_submit_button("この内容で更新する", use_container_width=True):
-                    errs = check(en, eu, er)
-                    if errs:
-                        for x in errs:
-                            st.error(x)
-                    else:
-                        plist = []
-                        for _, pr in ep.iterrows():
-                            nm = str(pr.get("商品名") or "").strip()
-                            rs = str(pr.get("その商品をおすすめする理由") or "").strip()
-                            if nm:
-                                plist.append({"name": nm, "reason": rs})
-                        ok, msg = update_row(key, curator, {
-                            "brand_name": en.strip(), "official_url": eu.strip(),
-                            "brand_reason": er.strip(), "products": plist, "layer": el})
-                        if ok:
-                            st.cache_data.clear()
-                            st.success(msg)
-                            st.rerun()
-                        else:
-                            st.error(msg)
+        c1, c2, c3, c4 = st.columns(widths, vertical_alignment="center")
+        c1.markdown(f"**{row.get('brand_name')}**")
+        c2.markdown(
+            "<div style='color:#8b93a1;white-space:nowrap;overflow:hidden;"
+            "text-overflow:ellipsis'>"
+            f"{_excerpt(row.get('brand_reason') or '')}</div>",
+            unsafe_allow_html=True)
+        c3.markdown(
+            "<div style='color:#8b93a1'>"
+            f"{str(len(products)) + '点' if products else '—'}</div>",
+            unsafe_allow_html=True)
+        if c4.button("閉じる" if opened else "編集", key=f"tgl_{key}",
+                     use_container_width=True):
+            st.session_state["edit_target"] = None if opened else key
+            st.rerun()
 
-            st.caption("この登録を消す場合はこちら。元に戻せません。")
-            if st.button("削除する", key=f"del_{key}"):
-                delete_row(key, curator)
-                st.cache_data.clear()
-                st.rerun()
-        st.markdown("---")
+        if opened:
+            _render_editor(row, key, products, curator)
+        st.markdown(
+            "<hr style='margin:0.4rem 0;border:none;border-top:1px solid #303643'>",
+            unsafe_allow_html=True)
 
 
 def render_export(curator: str) -> None:
