@@ -277,6 +277,65 @@ def check(name: str, url: str, brand_reason: str) -> list[str]:
 
 
 # ----------------------------------------------------------------- 画面
+def _seed_products(prefix: str, initial: list[dict] | None = None) -> None:
+    """商品欄の初期値を一度だけ置く。行は連番のidで持ち、途中を消しても
+    他の行の入力がずれないようにする"""
+    ids_key = f"{prefix}__ids"
+    if ids_key in st.session_state:
+        return
+    initial = list(initial or []) or [{}]
+    st.session_state[ids_key] = list(range(len(initial)))
+    st.session_state[f"{prefix}__next"] = len(initial)
+    for i, pr in enumerate(initial):
+        st.session_state[f"{prefix}__pname_{i}"] = pr.get("name", "")
+        st.session_state[f"{prefix}__preason_{i}"] = pr.get("reason", "")
+
+
+def _product_inputs(prefix: str) -> None:
+    """商品は1組ずつの入力欄で受ける。表（data_editor）を使うと、セルを
+    選んだだけの状態で打ち始めた1文字目が確定前に取られ、
+    「ぶ」が「bう」になるため"""
+    ids_key = f"{prefix}__ids"
+    ids = st.session_state[ids_key]
+
+    h1, h2, _h3 = st.columns([1.2, 2.2, 0.4])
+    h1.caption("商品名")
+    h2.caption("その商品をおすすめする理由")
+
+    for pid in ids:
+        c1, c2, c3 = st.columns([1.2, 2.2, 0.4], vertical_alignment="bottom")
+        c1.text_input("商品名", key=f"{prefix}__pname_{pid}",
+                      label_visibility="collapsed", placeholder="甲州織の傘")
+        c2.text_input("理由", key=f"{prefix}__preason_{pid}",
+                      label_visibility="collapsed",
+                      placeholder="骨を替えれば一生使える")
+        if len(ids) > 1 and c3.button("✕", key=f"{prefix}__pdel_{pid}",
+                                      help="この行を消す"):
+            st.session_state[ids_key] = [x for x in ids if x != pid]
+            st.rerun()
+
+    if st.button("＋ 商品を追加", key=f"{prefix}__add"):
+        nid = st.session_state[f"{prefix}__next"]
+        st.session_state[f"{prefix}__next"] = nid + 1
+        st.session_state[ids_key] = ids + [nid]
+        st.rerun()
+
+
+def _collect_products(prefix: str) -> list[dict]:
+    out = []
+    for pid in st.session_state.get(f"{prefix}__ids", []):
+        nm = str(st.session_state.get(f"{prefix}__pname_{pid}") or "").strip()
+        rs = str(st.session_state.get(f"{prefix}__preason_{pid}") or "").strip()
+        if nm:
+            out.append({"name": nm, "reason": rs})
+    return out
+
+
+def _clear_inputs(prefix: str) -> None:
+    for k in [k for k in st.session_state if k.startswith(prefix + "__")]:
+        st.session_state.pop(k, None)
+
+
 def render_form(layer: str, curator: str) -> None:
     if layer == "known":
         st.info("**知っているブランドを登録します。** "
@@ -285,47 +344,45 @@ def render_form(layer: str, curator: str) -> None:
         st.info("**調べていて見つけたブランドを登録します。** "
                 "なぜピンときたのか、その理由がいちばん大事な情報になります。")
 
-    with st.form(f"form_{layer}", clear_on_submit=True):
-        c1, c2 = st.columns([1, 1.4])
-        with c1:
-            name = st.text_input("ブランド名 *", placeholder="小宮商店")
-        with c2:
-            url = st.text_input("公式サイトのURL *", placeholder="https://www.komiyakasa.jp/")
+    flash = st.session_state.pop(f"flash_{layer}", None)
+    if flash:
+        st.success(flash)
 
-        brand_reason = st.text_area(
-            "このブランドをおすすめする理由 *", height=110,
-            placeholder=("ホームページに書いてあることの写しではなく、あなたの言葉で。"
-                         "\n例）修理しながら永く使うことを前提に作っている。"
-                         "職人が一本ずつ手で仕上げていて、直して使う文化そのものを掲げている。"),
-            help="ここが最も価値のある情報です。AIには書けない部分なので、思ったことをそのまま書いてください。")
+    prefix = f"f_{layer}"
+    _seed_products(prefix)
 
-        st.markdown("###### おすすめの商品（あれば・何件でも）")
-        products = st.data_editor(
-            pd.DataFrame([{"商品名": "", "その商品をおすすめする理由": ""}]),
-            num_rows="dynamic", use_container_width=True, hide_index=True,
-            key=f"products_{layer}",
-            column_config={
-                "商品名": st.column_config.TextColumn(width="small"),
-                "その商品をおすすめする理由": st.column_config.TextColumn(width="large"),
-            })
-        st.caption("行を増やすには、表の右上の ＋ を押すか、一番下の空行に直接入力します。"
-                   "商品が思い当たらなければ空欄のままで構いません。")
-        submitted = st.form_submit_button("登録する", use_container_width=True, type="primary")
+    c1, c2 = st.columns([1, 1.4])
+    with c1:
+        st.text_input("ブランド名 *", key=f"{prefix}__name", placeholder="小宮商店")
+    with c2:
+        st.text_input("公式サイトのURL *", key=f"{prefix}__url",
+                      placeholder="https://www.komiyakasa.jp/")
 
-    if submitted:
+    st.text_area(
+        "このブランドをおすすめする理由 *", height=110, key=f"{prefix}__reason",
+        placeholder=("ホームページに書いてあることの写しではなく、あなたの言葉で。"
+                     "\n例）修理しながら永く使うことを前提に作っている。"
+                     "職人が一本ずつ手で仕上げていて、直して使う文化そのものを掲げている。"),
+        help="ここが最も価値のある情報です。AIには書けない部分なので、"
+             "思ったことをそのまま書いてください。")
+
+    st.markdown("###### おすすめの商品（あれば・何件でも）")
+    _product_inputs(prefix)
+    st.caption("商品が思い当たらなければ、空欄のままで構いません。")
+
+    name = st.session_state.get(f"{prefix}__name", "")
+    url = st.session_state.get(f"{prefix}__url", "")
+    brand_reason = st.session_state.get(f"{prefix}__reason", "")
+
+    if st.button("登録する", key=f"{prefix}__submit",
+                 use_container_width=True, type="primary"):
         errs = check(name, url, brand_reason)
         if errs:
             for e in errs:
                 st.error(e)
             return
 
-        plist = []
-        if products is not None:
-            for _, r in products.iterrows():
-                nm = str(r.get("商品名") or "").strip()
-                rs = str(r.get("その商品をおすすめする理由") or "").strip()
-                if nm:
-                    plist.append({"name": nm, "reason": rs})
+        plist = _collect_products(prefix)
 
         dup = find_own_duplicate(url, curator)
         if dup:
@@ -334,17 +391,14 @@ def render_form(layer: str, curator: str) -> None:
 
         hit = find_existing(name, url)
         if hit:
-            st.warning(
-                f"**「{hit.get('name')}」は既にブランドDBに入っています**（{hit['kind']}が一致）。"
-                "　それでも登録すると、あなたの理由が既存のブランドに追記される形になります。"
-                "重複ではなく理由を足したい場合は、そのまま登録して構いません。")
             st.session_state[f"force_{layer}"] = {
                 "brand_name": name.strip(), "official_url": url.strip(),
                 "brand_reason": brand_reason.strip(), "products": plist,
                 "layer": layer, "curator": curator,
                 "existing_brand_id": hit.get("id"),
+                "existing_name": hit.get("name"), "existing_kind": hit["kind"],
             }
-            return
+            st.rerun()
 
         ok, msg = save_row({
             "brand_name": name.strip(),
@@ -354,20 +408,35 @@ def render_form(layer: str, curator: str) -> None:
             "layer": layer,
             "curator": curator,
         })
-        if ok:
-            st.success(f"{name.strip()} を登録しました（{msg}）")
-        else:
+        if not ok:
             st.error(msg)
+            return
+        st.session_state[f"flash_{layer}"] = f"{name.strip()} を登録しました（{msg}）"
+        _clear_inputs(prefix)
+        st.cache_data.clear()
+        st.rerun()
 
     pending = st.session_state.get(f"force_{layer}")
     if pending:
+        st.warning(
+            f"**「{pending.get('existing_name')}」は既にブランドDBに入っています**"
+            f"（{pending.get('existing_kind')}が一致）。"
+            "　それでも登録すると、あなたの理由が既存のブランドに追記される形になります。"
+            "重複ではなく理由を足したい場合は、そのまま登録して構いません。")
         c1, c2 = st.columns(2)
         if c1.button("それでも登録する", key=f"force_ok_{layer}", use_container_width=True):
-            row = {k: v for k, v in pending.items() if k != "existing_brand_id"}
-            row["review_notes"] = f"既存ブランド {pending.get('existing_brand_id')} と重複の可能性"
+            skip = ("existing_brand_id", "existing_name", "existing_kind")
+            row = {k: v for k, v in pending.items() if k not in skip}
+            row["review_notes"] = (
+                f"既存ブランド {pending.get('existing_brand_id')} と重複の可能性")
             ok, msg = save_row(row)
             st.session_state.pop(f"force_{layer}", None)
-            st.success(f"登録しました（{msg}）") if ok else st.error(msg)
+            if ok:
+                st.session_state[f"flash_{layer}"] = f"登録しました（{msg}）"
+                _clear_inputs(prefix)
+                st.cache_data.clear()
+            else:
+                st.error(msg)
             st.rerun()
         if c2.button("やめる", key=f"force_no_{layer}", use_container_width=True):
             st.session_state.pop(f"force_{layer}", None)
@@ -410,45 +479,53 @@ def _render_delete(key, row: dict, curator: str) -> None:
 
 
 def _render_editor(row: dict, key, products: list[dict], curator: str) -> None:
+    prefix = f"e_{key}"
+    _seed_products(prefix, products)
+    if f"{prefix}__name" not in st.session_state:
+        st.session_state[f"{prefix}__name"] = row.get("brand_name") or ""
+        st.session_state[f"{prefix}__url"] = row.get("official_url") or ""
+        st.session_state[f"{prefix}__reason"] = row.get("brand_reason") or ""
+        st.session_state[f"{prefix}__layer"] = row.get("layer") or "known"
+
     with st.container(border=True):
-        with st.form(f"edit_{key}"):
-            e1, e2 = st.columns([1, 1.4])
-            with e1:
-                name = st.text_input("ブランド名", value=row.get("brand_name") or "")
-            with e2:
-                url = st.text_input("公式サイトのURL", value=row.get("official_url") or "")
-            reason = st.text_area("このブランドをおすすめする理由",
-                                  value=row.get("brand_reason") or "", height=120)
-            st.caption("おすすめの商品")
-            base = pd.DataFrame(
-                [{"商品名": x.get("name", ""), "その商品をおすすめする理由": x.get("reason", "")}
-                 for x in products] or [{"商品名": "", "その商品をおすすめする理由": ""}])
-            edited = st.data_editor(base, num_rows="dynamic", hide_index=True,
-                                    use_container_width=True, key=f"ed_products_{key}")
-            layer = st.selectbox("どちらで登録したか", ["known", "explored"],
-                                 index=0 if row.get("layer") == "known" else 1,
-                                 format_func=lambda v: LAYERS[v])
-            if st.form_submit_button("この内容で更新する", use_container_width=True):
-                errs = check(name, url, reason)
-                if errs:
-                    for x in errs:
-                        st.error(x)
+        c1, c2 = st.columns([1, 1.4])
+        with c1:
+            st.text_input("ブランド名", key=f"{prefix}__name")
+        with c2:
+            st.text_input("公式サイトのURL", key=f"{prefix}__url")
+        st.text_area("このブランドをおすすめする理由", height=120,
+                     key=f"{prefix}__reason")
+
+        st.markdown("###### おすすめの商品")
+        _product_inputs(prefix)
+
+        st.selectbox("どちらで登録したか", ["known", "explored"],
+                     key=f"{prefix}__layer", format_func=lambda v: LAYERS[v])
+
+        if st.button("この内容で更新する", key=f"{prefix}__save",
+                     use_container_width=True, type="primary"):
+            name = st.session_state.get(f"{prefix}__name", "")
+            url = st.session_state.get(f"{prefix}__url", "")
+            reason = st.session_state.get(f"{prefix}__reason", "")
+            errs = check(name, url, reason)
+            if errs:
+                for x in errs:
+                    st.error(x)
+            else:
+                ok, msg = update_row(key, curator, {
+                    "brand_name": name.strip(),
+                    "official_url": url.strip(),
+                    "brand_reason": reason.strip(),
+                    "products": _collect_products(prefix),
+                    "layer": st.session_state.get(f"{prefix}__layer", "known"),
+                })
+                if ok:
+                    _clear_inputs(prefix)
+                    st.cache_data.clear()
+                    st.session_state["edit_target"] = None
+                    st.rerun()
                 else:
-                    plist = []
-                    for _, pr in edited.iterrows():
-                        nm = str(pr.get("商品名") or "").strip()
-                        rs = str(pr.get("その商品をおすすめする理由") or "").strip()
-                        if nm:
-                            plist.append({"name": nm, "reason": rs})
-                    ok, msg = update_row(key, curator, {
-                        "brand_name": name.strip(), "official_url": url.strip(),
-                        "brand_reason": reason.strip(), "products": plist, "layer": layer})
-                    if ok:
-                        st.cache_data.clear()
-                        st.session_state["edit_target"] = None
-                        st.rerun()
-                    else:
-                        st.error(msg)
+                    st.error(msg)
 
         _render_delete(key, row, curator)
 
