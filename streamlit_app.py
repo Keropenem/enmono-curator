@@ -288,6 +288,7 @@ def _seed_products(prefix: str, initial: list[dict] | None = None) -> None:
     st.session_state[f"{prefix}__next"] = len(initial)
     for i, pr in enumerate(initial):
         st.session_state[f"{prefix}__pname_{i}"] = pr.get("name", "")
+        st.session_state[f"{prefix}__purl_{i}"] = pr.get("url", "")
         st.session_state[f"{prefix}__preason_{i}"] = pr.get("reason", "")
 
 
@@ -298,21 +299,20 @@ def _product_inputs(prefix: str) -> None:
     ids_key = f"{prefix}__ids"
     ids = st.session_state[ids_key]
 
-    h1, h2, _h3 = st.columns([1.2, 2.2, 0.4])
-    h1.caption("商品名")
-    h2.caption("その商品をおすすめする理由")
-
-    for pid in ids:
-        c1, c2, c3 = st.columns([1.2, 2.2, 0.4], vertical_alignment="bottom")
-        c1.text_input("商品名", key=f"{prefix}__pname_{pid}",
-                      label_visibility="collapsed", placeholder="甲州織の傘")
-        c2.text_input("理由", key=f"{prefix}__preason_{pid}",
-                      label_visibility="collapsed",
-                      placeholder="骨を替えれば一生使える")
-        if len(ids) > 1 and c3.button("✕", key=f"{prefix}__pdel_{pid}",
-                                      help="この行を消す"):
-            st.session_state[ids_key] = [x for x in ids if x != pid]
-            st.rerun()
+    for n, pid in enumerate(ids, start=1):
+        with st.container(border=True):
+            c1, c2, c3 = st.columns([1.1, 1.7, 0.32], vertical_alignment="bottom")
+            c1.text_input("商品名", key=f"{prefix}__pname_{pid}",
+                          placeholder="甲州織の傘")
+            c2.text_input("商品ページのURL", key=f"{prefix}__purl_{pid}",
+                          placeholder="https://www.komiyakasa.jp/products/xxx")
+            if len(ids) > 1 and c3.button("✕", key=f"{prefix}__pdel_{pid}",
+                                          help=f"{n}つめを消す"):
+                st.session_state[ids_key] = [x for x in ids if x != pid]
+                st.rerun()
+            st.text_input("その商品をおすすめする理由",
+                          key=f"{prefix}__preason_{pid}",
+                          placeholder="骨を替えれば一生使える")
 
     if st.button("＋ 商品を追加", key=f"{prefix}__add"):
         nid = st.session_state[f"{prefix}__next"]
@@ -325,10 +325,26 @@ def _collect_products(prefix: str) -> list[dict]:
     out = []
     for pid in st.session_state.get(f"{prefix}__ids", []):
         nm = str(st.session_state.get(f"{prefix}__pname_{pid}") or "").strip()
+        ur = str(st.session_state.get(f"{prefix}__purl_{pid}") or "").strip()
         rs = str(st.session_state.get(f"{prefix}__preason_{pid}") or "").strip()
         if nm:
-            out.append({"name": nm, "reason": rs})
+            out.append({"name": nm, "url": ur, "reason": rs})
     return out
+
+
+def _product_errors(prefix: str) -> list[str]:
+    """商品名がないのにURLや理由だけ入っている行と、形になっていないURLを拾う"""
+    errs = []
+    for n, pid in enumerate(st.session_state.get(f"{prefix}__ids", []), start=1):
+        nm = str(st.session_state.get(f"{prefix}__pname_{pid}") or "").strip()
+        ur = str(st.session_state.get(f"{prefix}__purl_{pid}") or "").strip()
+        rs = str(st.session_state.get(f"{prefix}__preason_{pid}") or "").strip()
+        if not nm and (ur or rs):
+            errs.append(f"{n}つめの商品名が空です。名前を入れるか、行を ✕ で消してください")
+            continue
+        if nm and ur and not URL_RE.match(ur):
+            errs.append(f"{n}つめの商品のURLは https:// から始まる形で入れてください")
+    return errs
 
 
 def _clear_inputs(prefix: str) -> None:
@@ -414,7 +430,7 @@ def render_form(layer: str, curator: str) -> None:
             st.rerun()
 
     if submitted:
-        errs = check(name, url, brand_reason)
+        errs = check(name, url, brand_reason) + _product_errors(prefix)
         if errs:
             for e in errs:
                 st.error(e)
@@ -545,7 +561,7 @@ def _render_editor(row: dict, key, products: list[dict], curator: str) -> None:
             name = st.session_state.get(f"{prefix}__name", "")
             url = st.session_state.get(f"{prefix}__url", "")
             reason = st.session_state.get(f"{prefix}__reason", "")
-            errs = check(name, url, reason)
+            errs = check(name, url, reason) + _product_errors(prefix)
             if errs:
                 for x in errs:
                     st.error(x)
@@ -620,11 +636,28 @@ def render_export(curator: str) -> None:
     if not rows:
         st.caption("まだ登録がありません。")
         return
-    df = pd.DataFrame(rows)
-    cols = [c for c in ["brand_name", "official_url", "brand_reason",
-                        "product_name", "product_reason", "layer", "created_at"]
-            if c in df.columns]
-    df = df[cols]
+
+    # 商品1点につき1行にする。ブランドの情報は各行に繰り返す
+    flat = []
+    for r in rows:
+        base = {"ブランド名": r.get("brand_name"),
+                "公式サイトのURL": r.get("official_url"),
+                "おすすめする理由": r.get("brand_reason"),
+                "どちら": LAYERS.get(r.get("layer"), ""),
+                "登録日時": r.get("created_at")}
+        ps = _products_of(r)
+        if not ps:
+            flat.append({**base, "商品名": "", "商品ページのURL": "", "商品の理由": ""})
+            continue
+        for pr in ps:
+            flat.append({**base,
+                         "商品名": pr.get("name", ""),
+                         "商品ページのURL": pr.get("url", ""),
+                         "商品の理由": pr.get("reason", "")})
+
+    df = pd.DataFrame(flat)[["ブランド名", "公式サイトのURL", "おすすめする理由",
+                             "商品名", "商品ページのURL", "商品の理由",
+                             "どちら", "登録日時"]]
     st.dataframe(df, use_container_width=True, hide_index=True)
     st.download_button("CSVで書き出す", df.to_csv(index=False).encode("utf-8-sig"),
                        file_name=f"curator_picks_{curator}.csv", mime="text/csv")
