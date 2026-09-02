@@ -61,15 +61,21 @@ def _on_cloud() -> bool:
 
 
 @st.cache_resource(show_spinner=False)
+def _build_client(url: str, key: str):
+    """接続情報ごとに1つ作る。引数に含めるのは、設定を書き換えたときに
+    古い接続先を掴んだままにしないため（Cloud では設定変更後もプロセスが残る）"""
+    try:
+        return create_client(url, key)
+    except Exception:
+        return None
+
+
 def _client():
     """Supabase に繋がればそれを使い、繋がらなければローカル保存に切り替える"""
     url, key = _secret("SUPABASE_URL"), _secret("SUPABASE_SERVICE_ROLE_KEY")
     if not (url and key and create_client):
         return None
-    try:
-        return create_client(url, key)
-    except Exception:
-        return None
+    return _build_client(url, key)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -90,8 +96,12 @@ def _connection_status() -> tuple[bool, str]:
         msg = str(e)
         host = url.replace("https://", "").replace("http://", "").rstrip("/")
         if "Name or service not known" in msg or "getaddrinfo" in msg:
-            return False, (f"接続先 `{host}` が見つかりません。"
-                           "SUPABASE_URL の綴りを確認してください")
+            import re as _re
+            m = _re.search(r"[A-Za-z0-9._-]+\.supabase\.co", msg)
+            actual = m.group(0) if m else host
+            note = "" if actual == host else f"（設定値は `{host}`。食い違っています）"
+            return False, (f"接続先 `{actual}` が見つかりません。"
+                           f"SUPABASE_URL の綴りを確認してください{note}")
         if "Invalid API key" in msg or "JWT" in msg or "401" in msg:
             return False, "キーが正しくありません。service_role キーか確認してください"
         if "does not exist" in msg or "PGRST205" in msg:
